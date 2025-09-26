@@ -1,0 +1,27 @@
+Human:
+  name: Name
+  age: 100
+  hobbies:
+    - hobby1
+    - hobby2
+
+DBConfig:
+  host: localhost
+  port: 3306
+  user: user
+  password: password
+
+students:
+  - name: John Doe
+    age: 25
+    grade: A
+  - name: Alice Smith
+    age: 23
+    grade: B
+
+company:
+  name: Acme Inc.
+  address:
+    street: 123 Main St
+    city: Anytown
+    country: USA

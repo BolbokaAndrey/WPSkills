@@ -1,0 +1,21 @@
+.steps:
+  - name: install-dependencies
+    command: composer install
+  - name: build
+    command: php artisan build
+  - name: run-tests
+    command: php artisan test
+
+build-test:
+  extends: .steps
+  only:
+    refs:
+      - test
+  script: !reference [.steps]
+
+build-prod:
+  extends: .steps
+  only:
+    refs:
+      - master
+  script: !reference [.steps]
