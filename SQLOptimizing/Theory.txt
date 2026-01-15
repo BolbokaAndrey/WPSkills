@@ -1,0 +1,128 @@
+1. предельные значения для времени запросов (когда нужно бить в колокола)
+Для SELECT - дольше 1 секунды. Для сложных запросов аналитики - дольше 10 секунд.
+
+2. с помощью чего можно дебажить запросы в mysql?
+EXPLAIN перед SELECT/INSERT/UPDATE/DELETE для просмотра плана выполнения запроса
+Основные столбцы вывода
+    id: номер SELECT в запросе (один для simple, несколько для subqueries/JOIN).
+    select_type: тип — SIMPLE (простой), PRIMARY (внешний), SUBQUERY, DERIVED (временные таблице для подзапросов в FROM).
+    table: сканируемая таблица или derived table.
+    type: метод доступа — const (константа, идеал), eq_ref (уникальный index), ref (неуникальный), range, index, ALL (full scan — плохо).
+    possible_keys: доступные индексы для условия.
+    key: выбранный индекс.
+    key_len: длина используемого ключа (байты).
+    ref: сравниваемые значения (const, поле другой таблицы).
+    rows: оценка проверяемых строк (меньше — лучше).
+    Extra: доп.инфо — Using index (covering index), Using where (filter), Using temporary/filesort (плохо для ORDER BY).
+
+Цель: type=ref/const, rows<100, нет Using temporary/filesort/where. Если ALL/index — нужен индекс на колонки WHERE/JOIN/ORDER BY.
+
+EXPLAIN ANALYZE (FORMAT=JSON для MySql <8.0.18) перед SELECT/INSERT/UPDATE/DELETE для реального выполнения с метриками
+Показывает cost, nested loop, actual time.
+cost - это условная оценка "дороговизны" выполнения плана запроса. Нужно стремиться к уменьшению cost (<1000)
+
+Использовать slow_query_log с long_query_time=1-2 секунды и min_examined_row_limit для логирования.
+-  slow query log в MySQL логирует запросы, превышающие заданный порог времени выполнения, помогая выявлять узкие места
+   Включается в my.cnf slow_query_log=1 (или ON) и slow_query_log_file=/var/log/mysql/mysql-slow.log
+-  long_query_time устанавливает порог в секундах
+-  min_examined_row_limit логирует только запросы, сканирующие минимум указанное число строк (по умолчанию 0 — все медленные).
+Для анализа mysqldumpslow
+
+3.каким образом, выявив проблемы, можно попытаться их решить?
+-  добавить индексы на поля, используемые в WHERE, JOIN, ORDER BY, GROUP BY
+   для WHERE можно использовать составные индексы
+-  отказаться от SELECT *
+-  для крупных операций использовать Batch операции с LIMIT и OFFSET
+
+4.как оптимизировать - SELECT, INSERT, UPDATE - каждый?
+SELECT
+-  избегать SELECT *, выбирать только необходимые поля
+-  использовать индексы на поля, используемые в WHERE, JOIN, ORDER BY, GROUP BY
+-  вместо подзапросов использовать JOIN, так лучше используются индексы, не создаются временные таблицы
+***Было: SELECT * FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE active=1);
+   Стало: SELECT o.* FROM orders o INNER JOIN customers c ON o.customer_id = c.id WHERE c.active=1;
+***Было: SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id);
+   Стало: SELECT DISTINCT u.* FROM users u LEFT JOIN orders o ON o.user_id = u.id WHERE o.user_id IS NOT NULL;
+***Было: SELECT * FROM users JOIN (SELECT user_id, MAX(date) as last_order FROM orders GROUP BY user_id) d ON users.id = d.user_id;
+   Стало: SELECT u.*, o.date FROM users u JOIN orders o ON u.id = o.user_id WHERE o.date = (SELECT MAX(o2.date) FROM orders o2 WHERE o2.user_id = u.id);
+
+INSERT
+-  Вставлять пачками в одном INSERT
+***Было: INSERT INTO table VALUES (...);
+   Стало: INSERT INTO table (col1,col2) VALUES (1,'a'),(2,'b'),...,(1000,'z');
+-  отключать индексы перед операцией ALTER TABLE table DISABLE KEYS; затем ALTER TABLE table ENABLE KEYS;
+-  для партиций ALTER TABLE table EXCHANGE PARTITION p1 WITH TABLE temp_table
+-  INSERT IGNORE INTO table VALUES (...) пропускает дубликаты unique/primary key без ошибки.
+-  INSERT INTO table (id,val) VALUES (1,'new') ON DUPLICATE KEY UPDATE val='new'; обновляет существующую строку при конфликте
+-  SET UNIQUE_CHECKS=0; SET FOREIGN_KEY_CHECKS=0; SET AUTOCOMMIT=0; перед bulk, затем COMMIT; и SET ...=1; после.
+   Отключает построчную валидацию ограничений
+-  LOAD DATA INFILE '/path/data.csv' INTO TABLE table FIELDS TERMINATED BY ',' LINES TERMINATED BY '\n' IGNORE 1 LINES (col1,col2);
+   Быстрая параллельная загрузка из csv файлов
+
+UPDATE
+-  индекс на поле WHERE
+-  избегать функций в SET и WHERE
+-  обновлять минимально возможное количество полей
+-  для больших обновлений проще добавить новую колонку вместо замены
+
+5.каким образом и почему запросы становятся дольше при использовании join'ов всех видов?
+Происходит декартово произведение. Если без индексов, то сканирует все строки первой таблицы для каждой строки второй
+Например 100 users и 1000 orders - 100000 сравнений
+Если с индексом, будут сканироваться только подходящие и cost значительно снизится
+
+Функции в ON блокируют использование индекса. Применяется к каждой строке JOIN orders ON YEAR(order_date) = YEAR(curdate())
+Правильнее будет использовать WHERE YEAR(order_date) = YEAR(curdate()) после JOIN
+
+JOIN по VARCHAR(255) или TEXT загружает полные значения в буфер для сравнения. 1M строк × 255 байт = 255MB RAM только на поле
+Лучше сравнивать по ID или CHAR фиксированной длины
+
+Оптимизатор использует порядок таблиц меньшая JOIN большая. Можно обойти через STRAIGHT_JOIN, но это неэффективно
+
+JOIN не "сам по себе медленный" — проблема в отсутствии индексов, неправильном типе, функциях в ON, несогласованных типах данных.
+
+6.тупиковая ли ветвь для хайлоада - sql?
+Без индексов, нормализации, кеширования и наивного подхода действительно sql для хайлоада будет работать крайне медленно.
+Раньше sql не мог масштабироваться горизонтально (добавить больше серверов), а только вертикально (увеличивали мощность одного сервера).
+Было сложно реализовать транзакции между узлами, приходилось дважды комитить
+Всё общение между узлами приходилось делать по сети
+
+Со временем изменилось
+Vitess для MySql, Citus для PostgreSQL
+
+С другой стороны NoSQL начали добавлять транзакции и SQL-подобные запросы
+
+SQL можно пользоваться для хайлоада с умом
+
+7.1.Какие бывают индексы?
+B-Tree Подходит для: =, <, >, BETWEEN, LIKE
+Hash-индекс только по точному совпадению (=)
+GIN (Generalized Inverted Index) Для массивов, JSON, полного текста (full-text search)
+GiST (Generalized Search Tree) для геоданных, текста, геометрии
+BRIN (Block Range Index) Для очень больших таблиц с естественной сортировкой
+Full-Text Search Index Учитывает морфологию, стоп-слова, ранжирование.
+Composite (составной) индекс Индекс по нескольким колонкам. Порядок важен!
+Covering Index (включённый индекс) Хранит не только ключи, но и дополнительные колонки Позволяет выполнять запрос только по индексу, без обращения к таблице
+
+7.2. Какие типы данных можно индексировать?
+В целом любые, но с ограничениями и не всегда целесообразно
+JSON / JSONB Только через GIN/GiST (PostgreSQL), или функциональные индексы
+ARRAY Только через GIN (PostgreSQL)
+BLOB, BYTEA Обычно нельзя напрямую; можно индексировать хэш (md5(data))
+BOOLEAN Малая селективность. Бесполезно
+
+8. Почему индексы ускоряют запросы?
+Без индекса СУБД читает все строки, чтобы найти нужные.
+С индексом:
+    СУБД ищет по структурированной структуре (например, B-Tree)
+    Находит нужные rowid / pointer за O(log N) шагов
+    Читает только нужные строки
+
+9. Можно ли задать индексы со стороны ORM, не прибегая к миграциям?
+нет
+ORM — это абстракция над SQL
+Индексы — это часть схемы базы данных, а не логики приложения
+через ORM только описываются индексы, что в итоге приведёт к миграции
+
+10. Индексированы ли все ключи в Битрикс?
+С индексом первичные ключи (id), внешние ключи (напр. IBLOCK_ID, WF_PARENT_ELEMENT_ID), поля CODE, XML_ID в стандартных, иногда другие поля
+(??) Без индекса пользовательские свойства, пользовательские поля, кастомные таблицы
