@@ -58,4 +58,5 @@ class Penguin extends Bird
 function makeBirdFly(Flyable $bird): void
 {
     echo $bird->fly();
+    echo $bird->eat();
 }
