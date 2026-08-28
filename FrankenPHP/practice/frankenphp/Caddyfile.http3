@@ -1,0 +1,7 @@
+{$SITE_ADDRESS:localhost} {
+    root * /app/public
+
+    php_server {
+        worker /app/public/index.php 4
+    }
+}
